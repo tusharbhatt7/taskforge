@@ -33,6 +33,14 @@ tier does not, which matters for a link you'll be putting on a résumé.
    - **DATABASE_URL** → paste the Neon connection string from Step 1.
 
    (`SECRET_KEY` is generated automatically. `WORKER_COUNT` defaults to `2`.)
+
+   **Optional — AI features.** Add `ANTHROPIC_API_KEY` to enable the `llm_*` job types and
+   automatic AI triage of dead-lettered jobs. Leave it unset and everything else works
+   exactly as documented; the dashboard says AI is off rather than showing an empty panel.
+   Triage is cheap by design — analyses are deduplicated by error fingerprint, so one
+   broken dependency costs a single API call however many jobs it kills — but it is a
+   metered API, so treat the key like any other secret and watch the spend counter on the
+   Dead letter tab.
 5. Click **Apply** / **Create**. The first Docker build takes roughly 3–5 minutes.
 
 Watch the **Logs** tab. A healthy start looks like:

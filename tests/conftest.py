@@ -6,6 +6,9 @@ os.environ.setdefault(
     "DATABASE_URL", "postgresql+asyncpg://taskforge:taskforge@localhost:5432/taskforge_test"
 )
 os.environ.setdefault("SECRET_KEY", "test-secret-long-enough-for-hs256-signing")
+# A placeholder key so AI code paths are *reachable* in tests. No test makes a real API
+# call — the client is always faked; this only flips the "AI configured" feature gate.
+os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-test-placeholder-never-sent-anywhere")
 
 import pytest  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402

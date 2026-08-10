@@ -4,7 +4,9 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.client import is_configured
 from app.api.deps import get_current_user
+from app.core.config import get_settings
 from app.db.models import User
 from app.db.session import get_db
 
@@ -12,6 +14,36 @@ router = APIRouter(prefix="/metrics", tags=["metrics"])
 
 _cache: dict[str, tuple[float, dict]] = {}
 CACHE_TTL_S = 5.0
+
+
+@router.get("/ai")
+async def ai_status(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Whether AI features are usable, plus what they've cost this account.
+
+    The dashboard needs to say "no API key configured" rather than silently showing an
+    empty panel on a deployment without a key.
+    """
+    settings = get_settings()
+    spend = (await db.execute(text("""
+        SELECT count(*) AS triaged,
+               count(*) FILTER (WHERE reused_from_id IS NOT NULL) AS reused,
+               COALESCE(sum(cost_usd), 0) AS cost_usd,
+               COALESCE(sum(input_tokens + output_tokens), 0) AS tokens
+        FROM job_triage WHERE user_id = :uid
+    """), {"uid": user.id})).one()
+
+    return {
+        "enabled": is_configured(),
+        "model": settings.ai_model if is_configured() else None,
+        "auto_triage": settings.ai_triage_enabled and is_configured(),
+        "triage": {
+            "analyzed": spend.triaged,
+            # Deduped by error fingerprint instead of paying for an identical analysis.
+            "reused_from_fingerprint": spend.reused,
+            "tokens": spend.tokens,
+            "cost_usd": round(float(spend.cost_usd), 4),
+        },
+    }
 
 
 @router.get("/overview")

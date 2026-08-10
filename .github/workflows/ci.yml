@@ -41,6 +41,11 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      - name: Check dashboard JavaScript parses
+        # ruff can't see app.js, and a syntax error there is invisible server-side: the
+        # page still returns 200 and every handler silently fails to attach.
+        run: node --check app/static/js/app.js
+
       - name: Verify migrations match the models
         # Catches the classic bug where a model changes but nobody generates a migration.
         run: |

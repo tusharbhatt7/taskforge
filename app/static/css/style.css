@@ -170,6 +170,35 @@ label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px
   border: 1px solid rgba(255,95,95,0.3); border-radius: 9px;
   padding: 12px 14px; margin-bottom: 14px; font-size: 13px;
 }
+/* ---------- AI triage ---------- */
+.ai-banner {
+  background: linear-gradient(90deg, rgba(167,139,250,0.12), transparent);
+  border: 1px solid rgba(167,139,250,0.3); border-radius: 9px;
+  padding: 12px 14px; margin-bottom: 14px; font-size: 13px;
+}
+.ai-banner.off { background: linear-gradient(90deg, rgba(139,149,167,0.1), transparent);
+  border-color: var(--border); color: var(--muted); }
+.ai-banner .cost { color: var(--muted); font-size: 12px; }
+
+.badge.transient { background: rgba(245,166,35,0.15);  color: #f5b74e; }
+.badge.permanent { background: rgba(255,95,95,0.15);   color: #ff8080; }
+.badge.ai        { background: rgba(167,139,250,0.16); color: #bda6ff; }
+
+.triage-card {
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-left: 3px solid var(--purple);
+  border-radius: 9px; padding: 13px 15px; margin-top: 6px;
+}
+.triage-card .row-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 9px; }
+.triage-card dt { color: var(--muted); font-size: 11.5px; text-transform: uppercase;
+  letter-spacing: 0.04em; margin-top: 9px; }
+.triage-card dd { margin: 3px 0 0; font-size: 13px; }
+.triage-card .meta { color: var(--muted); font-size: 11.5px; margin-top: 11px;
+  padding-top: 9px; border-top: 1px solid var(--border); }
+.conf-bar { display: inline-block; width: 54px; height: 5px; border-radius: 3px;
+  background: var(--bg); overflow: hidden; vertical-align: middle; }
+.conf-bar i { display: block; height: 100%; background: var(--purple); }
+
 .attempt-row { display: flex; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(38,45,58,0.6); }
 .attempt-no { font-family: var(--mono); color: var(--muted); width: 28px; }
 pre.json {

@@ -115,12 +115,13 @@
 
     <!-- ============ DLQ ============ -->
     <section class="view" id="view-dlq">
+      <div class="ai-banner" id="ai-banner"></div>
       <div class="panel">
         <header><h3>Dead-letter queue</h3><div class="spacer"></div>
           <span class="panel-sub">jobs that exhausted every retry</span></header>
         <div class="table-wrap"><table>
-          <thead><tr><th>Type</th><th>Queue</th><th>Attempts</th><th>Last error</th>
-            <th>Failed at</th><th></th></tr></thead>
+          <thead><tr><th>Type</th><th>Queue</th><th>Attempts</th><th>AI triage</th>
+            <th>Last error</th><th>Failed at</th><th></th></tr></thead>
           <tbody id="dlq-body"></tbody>
         </table></div>
       </div>
@@ -192,6 +193,15 @@
           force a dead-letter) · <code>http_fetch</code>: <code>{"url": "https://example.com"}</code> ·
           <code>thumbnail</code>: <code>{"width": 128, "height": 128}</code> ·
           <code>email_sim</code>: <code>{"to": "a@b.com", "subject": "hi"}</code>
+        </p>
+        <p class="panel-sub">
+          AI handlers (need <code>ANTHROPIC_API_KEY</code>) — <code>llm_summarize</code>:
+          <code>{"text": "…", "max_words": 40}</code> · <code>llm_classify</code>:
+          <code>{"text": "…", "labels": ["a", "b"]}</code> · <code>llm_extract</code>:
+          <code>{"text": "…", "fields": ["total", "date"]}</code>. Selecting a type fills in a
+          working example. These exercise the retry path with real rate limits: a 429 is
+          rescheduled using the API's own <code>Retry-After</code>, and a malformed payload
+          dead-letters immediately instead of burning three attempts.
         </p>
       </div>
     </section>

@@ -104,6 +104,12 @@ def create_app() -> FastAPI:
         start = time.perf_counter()
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
+        # The dashboard ships with the API, so a redeploy changes both at once. Without
+        # this, browsers heuristically cache the old JS (StaticFiles sends ETag but no
+        # Cache-Control) and run it against the new API. `no-cache` forces revalidation,
+        # which the ETag then answers with a cheap 304.
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
         if request.url.path.startswith("/api/") and request.url.path != "/api/v1/stream":
             logger.info("%s %s -> %s (%.1fms)", request.method, request.url.path,
                         response.status_code, (time.perf_counter() - start) * 1000)

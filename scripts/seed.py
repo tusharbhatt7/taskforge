@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
+from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.core.security import generate_api_key, generate_webhook_secret, hash_password
 from app.db.models import ApiKey, Job, JobDep, JobState, Queue, Schedule, User
@@ -56,6 +57,10 @@ async def main() -> None:
             ("http_fetch", {"url": "https://example.com"}, "default", 0, 3),
             ("flaky", {"fail_times": 1}, "default", 0, 3),      # retries once, then succeeds
             ("flaky", {"fail_times": 9}, "default", 0, 2),      # exhausts retries -> dead letter
+            # A dead-letter with a *distinct* error signature, so AI triage has two
+            # fingerprints to work with rather than one (when a key is configured).
+            ("http_fetch", {"url": "https://taskforge-nonexistent.invalid"},
+             "default", 0, 1),
         ]
         jobs = []
         for job_type, payload, queue, priority, max_attempts in specs:
@@ -79,6 +84,12 @@ async def main() -> None:
 
         await db.commit()
         print(f"queued {len(jobs) + 2} demo jobs (including a dependent 2-stage pipeline)")
+        if get_settings().anthropic_api_key:
+            print("ANTHROPIC_API_KEY detected: llm_* job types are enabled and the two "
+                  "seeded dead-letters will be triaged automatically.")
+        else:
+            print("No ANTHROPIC_API_KEY: llm_* job types and AI triage are disabled. "
+                  "Everything else works.")
 
     await engine.dispose()
 

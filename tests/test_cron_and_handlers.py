@@ -94,7 +94,14 @@ def _ctx(attempt: int = 1, max_attempts: int = 3) -> JobContext:
 
 
 async def test_all_advertised_handlers_are_registered():
-    assert set(HANDLERS) == {"sleep", "flaky", "http_fetch", "thumbnail", "email_sim"}
+    from app.worker.handlers import public_types
+
+    demo_and_io = {"sleep", "flaky", "http_fetch", "thumbnail", "email_sim"}
+    ai = {"llm_summarize", "llm_classify", "llm_extract"}
+    assert set(public_types()) == demo_and_io | ai
+    # ai_triage is registered but engine-internal — enqueued by the dead-letter
+    # transition, never submitted by a client.
+    assert set(HANDLERS) == demo_and_io | ai | {"ai_triage"}
 
 
 async def test_sleep_handler_caps_duration(monkeypatch):

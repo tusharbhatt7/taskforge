@@ -15,6 +15,7 @@ from app.db.models import Job, Worker, WorkerState
 from app.db.session import SessionLocal, engine
 from app.engine import events, states
 from app.engine.claim import claim_jobs, renew_leases
+from app.engine.errors import PermanentError, RetryAfterError
 from app.worker.handlers import HANDLERS, JobContext
 
 logger = logging.getLogger("taskforge.worker")
@@ -77,13 +78,22 @@ class WorkerRunner:
         ctx = JobContext(job_id=job_id, attempt=attempt, max_attempts=max_attempts)
         error: str | None = None
         result: dict | None = None
+        permanent = False
+        retry_after: float | None = None
         try:
             handler = HANDLERS.get(job_type)
             if handler is None:
-                raise LookupError(f"no handler registered for job type '{job_type}'")
+                # An unregistered type can never succeed, however many times we try.
+                raise PermanentError(f"no handler registered for job type '{job_type}'")
             result = await asyncio.wait_for(handler(payload, ctx), timeout=JOB_TIMEOUT_SECONDS)
         except TimeoutError:
             error = f"job timed out after {JOB_TIMEOUT_SECONDS}s"
+        except PermanentError as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            permanent = True
+        except RetryAfterError as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            retry_after = exc.retry_after
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
 
@@ -99,8 +109,10 @@ class WorkerRunner:
                 await states.complete_job(session, job, result, worker_id=self.id)
                 logger.info("job succeeded", extra={"job_id": str(job_id)})
             else:
-                await states.fail_job(session, job, error, worker_id=self.id)
-                logger.warning("job attempt failed: %s", error, extra={"job_id": str(job_id)})
+                await states.fail_job(session, job, error, worker_id=self.id,
+                                      permanent=permanent, retry_delay_override=retry_after)
+                logger.warning("job attempt failed%s: %s", " (permanent)" if permanent else "",
+                               error, extra={"job_id": str(job_id)})
             await session.commit()
 
     async def _heartbeat_forever(self) -> None:

@@ -43,6 +43,9 @@ surviving worker finishes them. **No job is lost, no human intervenes.**
 | **Live dashboard** | Server-Sent Events over Postgres `LISTEN/NOTIFY` stream every state change to the browser in real time |
 | **Multi-tenancy** | Per-user data isolation, JWT for the dashboard, hashed API keys for programmatic access, rate limiting on credential endpoints |
 | **Observability** | Queue depths, throughput, success rate, and p50/p95/p99 execution latency via `percentile_cont` |
+| **Permanent vs retryable failures** | A handler can declare a failure unretryable (bad payload, revoked key) so it dead-letters immediately instead of burning its retry budget, or hand back a server-supplied `Retry-After` that overrides our backoff |
+| **AI job types** | `llm_summarize` / `llm_classify` / `llm_extract` run Claude calls as queued work, with schema-constrained JSON output and per-job token/cost accounting |
+| **AI failure triage** | When a job dead-letters, the platform analyses its own dead-letter queue: category, transient-or-permanent, root cause, suggested action — deduplicated by error fingerprint so an outage costs one API call, not hundreds |
 
 ## Architecture
 
@@ -67,6 +70,8 @@ flowchart TB
         WN["worker N"]
     end
 
+    CLAUDE(["Claude API<br/>llm_* handlers + dead-letter triage"])
+
     PG[("PostgreSQL<br/>jobs · attempts · workers<br/>schedules · deliveries")]
 
     CURL --> REST
@@ -80,6 +85,7 @@ flowchart TB
     W2 <--> PG
     WN <--> PG
     PG -.->|"LISTEN / NOTIFY"| STREAM
+    W1 -.->|"429 → Retry-After<br/>400 → dead-letter now"| CLAUDE
 ```
 
 ### Job lifecycle
@@ -95,6 +101,8 @@ stateDiagram-v2
     running --> queued: attempt failed → backoff retry
     running --> queued: lease expired (worker died)
     running --> dead: attempts exhausted
+    running --> dead: permanent failure (skips remaining retries)
+    dead --> dead: AI triage attached
     queued --> canceled: canceled by user
     dead --> queued: requeued from DLQ
     succeeded --> [*]
@@ -154,6 +162,39 @@ from a long stall can never steal back a job the reaper already reassigned.
 Without it, a downstream outage that fails 500 jobs simultaneously would retry all 500
 at the same instant, re-failing together and hammering a service that's trying to
 recover. Full jitter spreads them across a window.
+
+**Why is AI in a job queue project at all?**
+Because LLM calls are the textbook workload for one. They take seconds to minutes, they
+are hard rate-limited, and they fail transiently — run one inline in a request handler and
+the user waits, then a 429 becomes a user-visible error. Moving them here means the
+existing backoff, retry and dead-letter machinery applies unchanged. It also pushed two
+genuine engine features that the demo handlers never needed: a **permanent** failure
+(a 400 will fail identically on every retry, so dead-letter it now rather than three
+attempts later) and a **server-directed retry delay** (a 429 carrying `Retry-After: 30`
+means retrying at 5s is guaranteed to fail *and* spends another request against the limit).
+
+**Why does the platform triage its own dead-letter queue?**
+A dead-letter queue answers "what failed" but not "why, and what do I do about it".
+Triage fills that in, and it runs *as a job on the platform* — same claiming, leasing,
+retries and dead-lettering as any other work, on a dedicated `triage` queue so pausing a
+business queue never stops ops tooling. Two details carry most of the engineering:
+
+- **A loop guard.** Triage is never enqueued for a triage job. Without it a failing
+  triage handler dead-letters, enqueues triage for itself, dead-letters again — an
+  unbounded loop that spends real money.
+- **Fingerprint deduplication.** One broken dependency dead-letters hundreds of jobs that
+  all failed the same way. Errors are normalized (ids, numbers, timestamps, quoted strings
+  stripped) into a fingerprint, and a job whose fingerprint is already explained reuses
+  that analysis. Verified live: six simultaneous dead-letters of one signature produced
+  **one** API call and five reuses.
+
+That dedupe is a read-then-write race, and the first version had it: the triage jobs were
+claimed in the same batch, every one read "no prior analysis" before any committed, and
+every one paid. The fix is a transaction-scoped advisory lock on the fingerprint —
+deliberately the *opposite* policy to job claiming, which uses `SKIP LOCKED` to avoid
+waiting. There, contention means another worker owns the job and we should move on; here,
+contention means the answer is already being computed and waiting is exactly what saves
+the call.
 
 **Why an in-process scheduler instead of Celery Beat or a separate service?**
 Fewer moving parts, and the reaper/cron loops use `SKIP LOCKED` too — so running several
@@ -259,6 +300,13 @@ def is_valid(body: bytes, signature: str, secret: str) -> bool:
 | `email_sim` | `{"to": "...", "subject": "..."}` | Variable-latency provider simulation |
 | `sleep` | `{"seconds": 3}` | Occupies a worker slot; useful for chaos demos |
 | `flaky` | `{"fail_times": 2}` | Fails deterministically for N attempts using the attempt counter as its only state, so behaviour survives crashes. Set `fail_times ≥ max_attempts` to force a dead-letter |
+| `llm_summarize` | `{"text": "...", "max_words": 120}` | Claude call with schema-constrained JSON output; reports tokens and cost |
+| `llm_classify` | `{"text": "...", "labels": ["a", "b"]}` | The schema constrains the answer to your labels, so an unusable value is impossible |
+| `llm_extract` | `{"text": "...", "fields": ["total", "date"]}` | Structured extraction; reports which fields were genuinely absent rather than inventing them |
+
+The three `llm_*` types need `ANTHROPIC_API_KEY`. Without it they dead-letter on the first
+attempt with an actionable message, and the rest of the platform is unaffected — the
+dashboard says so plainly instead of showing an empty panel.
 
 Adding your own is a decorated function:
 ```python
@@ -270,7 +318,7 @@ async def resize_video(payload: dict, ctx: JobContext) -> dict:
 ## Tests
 
 ```bash
-uv run pytest -q     # 82 tests against real PostgreSQL
+uv run pytest -q     # 129 tests against real PostgreSQL
 ```
 
 They run against real Postgres rather than mocks, because the core guarantee *is* a
@@ -290,6 +338,16 @@ Postgres behaviour — a mocked `SKIP LOCKED` would prove nothing. Notable cases
 - **`test_dead_parent_cascades_cancel_through_the_whole_subtree`** — transitive cancellation
 - **`test_http_fetch_refuses_internal_addresses`** — SSRF guard, including the cloud
   metadata endpoint
+- **`test_concurrent_triage_of_the_same_failure_calls_the_api_once`** — five simultaneous
+  triages of one error signature must make exactly one API call. Worth reading as a
+  cautionary tale: the sequential version of this test passed while the live system still
+  paid twice, and the concurrent version *also* passed until the fake client was made to
+  suspend like a real API call does. Without the advisory lock it now fails with
+  "5 concurrent triages made 5 API calls"
+- **AI error mapping** — a 429 becomes a retry that honours `Retry-After`, a 400/401/403
+  dead-letters immediately, a 529 stays retryable, and `stop_reason: "refusal"` is handled
+  before touching `content` (indexing it first would raise an unrelated `IndexError` that
+  hides the real cause)
 
 CI runs lint, `alembic check` (fails if models drifted from migrations), and the suite
 against a Postgres service container.
@@ -320,13 +378,14 @@ same image.
 ```
 app/
   main.py            app factory; lifespan starts reaper, cron, webhook, keep-alive loops
+  ai/                client.py (error mapping, cost accounting) · triage.py · prompts.py
   core/              config, JWT + API-key + HMAC security, structured logging, rate limiting
   db/                async engine, SQLAlchemy 2.0 models
   api/               routers: auth, api_keys, jobs, queues, schedules, workers, metrics, stream
-  engine/            claim.py · states.py · reaper.py · retry.py · cron.py · webhooks.py · events.py
+  engine/            claim.py · states.py · reaper.py · retry.py · cron.py · webhooks.py · events.py · errors.py
   worker/            worker process, runner loop, handler registry
   static/            dashboard (vanilla JS + canvas charts, zero frontend dependencies)
-tests/               82 tests against real Postgres
+tests/               129 tests against real Postgres
 sdk/client.py        Python client
 scripts/             seed.py, demo.py
 ```

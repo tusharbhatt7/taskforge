@@ -30,5 +30,11 @@ def handler(name: str) -> Callable[[Handler], Handler]:
     return register
 
 
+def public_types() -> list[str]:
+    """Job types a client may submit. `ai_triage` is engine-internal: it is enqueued by
+    the dead-letter transition and takes a job id the submitter shouldn't be choosing."""
+    return sorted(t for t in HANDLERS if t != "ai_triage")
+
+
 # Importing the modules registers their handlers.
-from app.worker.handlers import demo, http_fetch, thumbnail  # noqa: E402, F401
+from app.worker.handlers import demo, http_fetch, llm, thumbnail, triage  # noqa: E402, F401

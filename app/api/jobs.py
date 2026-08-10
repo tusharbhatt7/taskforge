@@ -2,23 +2,25 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.client import is_configured
 from app.api.deps import get_current_user
-from app.db.models import Job, JobAttempt, JobDep, JobState, Queue, User, WebhookDelivery
-from app.db.session import get_db
+from app.db.models import Job, JobAttempt, JobDep, JobState, JobTriage, Queue, User, WebhookDelivery
+from app.db.session import SessionLocal, get_db
 from app.engine import events, states
 from app.schemas.schemas import (
     JobDetailOut,
     JobListOut,
     JobOut,
     JobSubmitIn,
+    TriageOut,
     WebhookDeliveryOut,
 )
-from app.worker.handlers import HANDLERS
+from app.worker.handlers import public_types
 
 router = APIRouter(tags=["jobs"])
 
@@ -31,14 +33,24 @@ UNPROCESSABLE = 422
 @router.post("/jobs", response_model=JobOut, status_code=status.HTTP_201_CREATED)
 async def submit_job(body: JobSubmitIn, response: Response, user: User = Depends(get_current_user),
                      db: AsyncSession = Depends(get_db)):
-    if body.type not in HANDLERS:
+    if body.type not in public_types():
         raise HTTPException(
             UNPROCESSABLE,
-            f"Unknown job type '{body.type}'. Available: {sorted(HANDLERS)}",
+            f"Unknown job type '{body.type}'. Available: {public_types()}",
         )
 
     # Idempotent submission: same (user, idempotency_key) always returns the same job.
+    #
+    # The lock serializes concurrent submissions of one key so the check below is not a
+    # read-then-write race. Without it, simultaneous duplicates all read "not present",
+    # all insert, and every loser has to recover from a failed commit — which leaves its
+    # session in a state the retry can't reliably reuse. The unique index remains as a
+    # backstop for anything that slips through (see the IntegrityError handler below).
     if body.idempotency_key:
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:uid), hashtext(:key))"),
+            {"uid": str(user.id), "key": body.idempotency_key},
+        )
         if existing := await _find_by_idempotency_key(db, user.id, body.idempotency_key):
             response.status_code = status.HTTP_200_OK
             return existing
@@ -84,13 +96,17 @@ async def submit_job(body: JobSubmitIn, response: Response, user: User = Depends
                           job_type=job.type, state=job.state)
         await db.commit()
     except IntegrityError:
-        # Two racing submissions with the same idempotency key: the unique partial index
-        # rejects the loser, which then returns the winner's row.
+        # Backstop: the advisory lock above should have prevented this, but the unique
+        # partial index is the real guarantee. Recover on a fresh session — a session
+        # whose commit just failed can't be relied on for the follow-up read.
         await db.rollback()
         if body.idempotency_key:
-            if existing := await _find_by_idempotency_key(db, user.id, body.idempotency_key):
-                response.status_code = status.HTTP_200_OK
-                return existing
+            async with SessionLocal() as recovery:
+                existing = await _find_by_idempotency_key(recovery, user.id,
+                                                          body.idempotency_key)
+                if existing:
+                    response.status_code = status.HTTP_200_OK
+                    return existing
         raise
 
     await db.refresh(job)
@@ -135,9 +151,13 @@ async def get_job(job_id: uuid.UUID, user: User = Depends(get_current_user),
     parents = (await db.execute(
         select(JobDep.parent_id).where(JobDep.job_id == job.id)
     )).scalars().all()
+    triage = (await db.execute(
+        select(JobTriage).where(JobTriage.job_id == job.id)
+    )).scalar_one_or_none()
     detail = JobDetailOut.model_validate(job)
     detail.job_attempts = attempts
     detail.depends_on = list(parents)
+    detail.triage = TriageOut.model_validate(triage) if triage else None
     return detail
 
 
@@ -182,6 +202,53 @@ async def retry_job(job_id: uuid.UUID, user: User = Depends(get_current_user),
     await db.commit()
     await db.refresh(job)
     return job
+
+
+@router.post("/jobs/{job_id}/triage", response_model=JobOut, status_code=status.HTTP_202_ACCEPTED)
+async def request_job_triage(job_id: uuid.UUID, user: User = Depends(get_current_user),
+                            db: AsyncSession = Depends(get_db)):
+    """Queue AI triage for a dead-lettered job on demand.
+
+    Returns the triage *job* — analysis runs asynchronously through the same queue as
+    everything else, so a slow model call never blocks this request. Poll the target
+    job's detail endpoint for the result.
+    """
+    if not is_configured():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            "AI features are disabled: ANTHROPIC_API_KEY is not set.")
+    job = await _owned_job(db, user, job_id)
+    if job.state != JobState.DEAD.value:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"Only dead-lettered jobs can be triaged (job is '{job.state}').")
+
+    existing = (await db.execute(
+        select(JobTriage).where(JobTriage.job_id == job.id)
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This job has already been triaged.")
+
+    await states.request_triage(db, job)
+    triage_job = (await db.execute(
+        select(Job).where(Job.user_id == user.id,
+                          Job.idempotency_key == f"triage:{job.id}")
+    )).scalar_one_or_none()
+    if triage_job is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            "Triage is disabled (ai_triage_enabled=false).")
+    await db.commit()
+    await db.refresh(triage_job)
+    return triage_job
+
+
+@router.get("/triage", response_model=list[TriageOut])
+async def list_triage(limit: int = Query(default=50, ge=1, le=200),
+                      user: User = Depends(get_current_user),
+                      db: AsyncSession = Depends(get_db)):
+    rows = await db.execute(
+        select(JobTriage).where(JobTriage.user_id == user.id)
+        .order_by(JobTriage.created_at.desc()).limit(limit)
+    )
+    return list(rows.scalars())
 
 
 @router.get("/webhook-deliveries", response_model=list[WebhookDeliveryOut])

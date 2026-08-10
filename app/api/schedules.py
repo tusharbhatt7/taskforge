@@ -10,7 +10,7 @@ from app.db.models import Schedule, User
 from app.db.session import get_db
 from app.engine.cron import next_fire
 from app.schemas.schemas import ScheduleIn, ScheduleOut
-from app.worker.handlers import HANDLERS
+from app.worker.handlers import public_types
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
@@ -65,9 +65,9 @@ async def delete_schedule(schedule_id: uuid.UUID, user: User = Depends(get_curre
 
 
 def _validate_type(job_type: str) -> None:
-    if job_type not in HANDLERS:
+    if job_type not in public_types():
         raise HTTPException(UNPROCESSABLE,
-                            f"Unknown job type '{job_type}'. Available: {sorted(HANDLERS)}")
+                            f"Unknown job type '{job_type}'. Available: {public_types()}")
 
 
 async def _owned(db: AsyncSession, user: User, schedule_id: uuid.UUID) -> Schedule:

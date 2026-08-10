@@ -189,6 +189,40 @@ class Schedule(Base):
     created_at: Mapped[datetime] = _tstz(server_default=func.now())
 
 
+class JobTriage(Base):
+    """AI analysis of a dead-lettered job. One row per triaged job."""
+
+    __tablename__ = "job_triage"
+    __table_args__ = (
+        # Fingerprint lookup is the cost-control path: before calling the API, check
+        # whether this class of failure has already been explained.
+        Index("ix_triage_fingerprint", "user_id", "fingerprint"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"),
+                                               nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(32), nullable=False)
+    category: Mapped[str] = mapped_column(String(30), nullable=False)
+    is_transient: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    root_cause: Mapped[str] = mapped_column(Text, nullable=False)
+    suggested_action: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    model: Mapped[str] = mapped_column(String(60), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0"))
+    # Set when this analysis was copied from an earlier job with the same fingerprint
+    # instead of costing another API call.
+    reused_from_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("job_triage.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = _tstz(server_default=func.now())
+
+
 class WebhookDelivery(Base):
     __tablename__ = "webhook_deliveries"
     __table_args__ = (

@@ -15,10 +15,12 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.client import is_configured
 from app.core.config import get_settings
-from app.db.models import AttemptOutcome, Job, JobAttempt, JobState, WebhookDelivery
+from app.db.models import AttemptOutcome, Job, JobAttempt, JobState, Queue, WebhookDelivery
 from app.engine import events
 from app.engine.retry import backoff_seconds
 
@@ -45,21 +47,29 @@ async def complete_job(session: AsyncSession, job: Job, result: dict | None,
 async def fail_job(session: AsyncSession, job: Job, error: str,
                    worker_id: uuid.UUID | None = None,
                    attempt_outcome: AttemptOutcome = AttemptOutcome.FAILED,
-                   retry_delay_override: float | None = None) -> None:
-    """A single attempt failed. Either schedule a retry or dead-letter the job."""
+                   retry_delay_override: float | None = None,
+                   permanent: bool = False) -> None:
+    """A single attempt failed. Either schedule a retry or dead-letter the job.
+
+    `permanent` short-circuits the retry budget for failures that cannot succeed on a
+    retry (see app/engine/errors.py); `retry_delay_override` replaces our backoff with a
+    delay the downstream service asked for.
+    """
     settings = get_settings()
     await _close_attempt(session, job, attempt_outcome, error)
     job.leased_by = None
     job.lease_expires_at = None
 
-    if job.attempts >= job.max_attempts:
+    if permanent or job.attempts >= job.max_attempts:
         job.state = JobState.DEAD.value
         job.error = error
         job.finished_at = _now()
         await _cascade_cancel_dependents(session, job, f"parent job {job.id} dead-lettered")
         await _enqueue_webhook(session, job, "job.dead")
+        await request_triage(session, job)
         await events.emit(session, "job.dead", job.user_id, job_id=job.id, queue=job.queue,
-                          job_type=job.type, error=error[:300], worker_id=worker_id)
+                          job_type=job.type, error=error[:300], worker_id=worker_id,
+                          permanent=permanent)
     else:
         delay = retry_delay_override if retry_delay_override is not None else backoff_seconds(
             job.attempts, settings.retry_base_seconds, settings.retry_cap_seconds)
@@ -150,6 +160,48 @@ async def _enqueue_webhook(session: AsyncSession, job: Job, event: str) -> None:
                 "finished_at": job.finished_at.isoformat() if job.finished_at else None,
             },
         },
+    ))
+
+
+TRIAGE_JOB_TYPE = "ai_triage"
+TRIAGE_QUEUE = "triage"
+
+
+async def request_triage(session: AsyncSession, dead_job: Job) -> None:
+    """Enqueue AI triage for a job that just dead-lettered.
+
+    Triage is itself an ordinary job on this platform — it gets the same claiming,
+    leasing, retry and dead-letter treatment as any other work. Three guards matter:
+
+    1. Never triage a triage job. Without this, a failing triage handler dead-letters,
+       which enqueues triage for *it*, which dead-letters — an unbounded loop that would
+       spend real money.
+    2. Don't enqueue when no API key is configured. Otherwise every dead-lettered job
+       spawns a triage job that also dead-letters, doubling the noise in the queue an
+       operator is trying to read.
+    3. Run on a dedicated queue, so pausing a business queue never stops ops tooling
+       (and a triage backlog never starves paying work).
+    """
+    settings = get_settings()
+    if (not settings.ai_triage_enabled
+            or not is_configured()
+            or dead_job.type == TRIAGE_JOB_TYPE):
+        return
+
+    await session.execute(
+        pg_insert(Queue).values(user_id=dead_job.user_id, name=TRIAGE_QUEUE)
+        .on_conflict_do_nothing(constraint="uq_queue_user_name")
+    )
+    session.add(Job(
+        user_id=dead_job.user_id,
+        queue=TRIAGE_QUEUE,
+        type=TRIAGE_JOB_TYPE,
+        payload={"target_job_id": str(dead_job.id)},
+        state=JobState.QUEUED.value,
+        priority=-10,          # never ahead of the user's own work
+        max_attempts=2,
+        # One triage per dead job, even if this transition somehow runs twice.
+        idempotency_key=f"triage:{dead_job.id}",
     ))
 
 

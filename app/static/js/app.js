@@ -7,7 +7,8 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const JOB_TYPES = ['sleep', 'flaky', 'http_fetch', 'thumbnail', 'email_sim'];
+const JOB_TYPES = ['sleep', 'flaky', 'http_fetch', 'thumbnail', 'email_sim',
+  'llm_summarize', 'llm_classify', 'llm_extract'];
 let jobsOffset = 0;
 const JOBS_LIMIT = 25;
 
@@ -238,6 +239,37 @@ async function loadJobs() {
   wireJobRows($('jobs-body'));
 }
 
+function triagePanel(t) {
+  if (!t) return '';
+  const pct = Math.round((t.confidence || 0) * 100);
+  const reused = t.reused_from_id
+    ? '<span class="muted"> · reused from an earlier job with the same error signature ' +
+      '(no additional API call)</span>'
+    : '';
+  return `
+    <div class="field"><label>AI triage</label>
+      <div class="triage-card">
+        <div class="row-head">
+          <span class="badge ai">${esc(CATEGORY_LABEL[t.category] || t.category)}</span>
+          <span class="badge ${t.is_transient ? 'transient' : 'permanent'}">
+            ${t.is_transient ? 'likely transient' : 'likely permanent'}</span>
+          <span class="muted" style="font-size:12px">confidence
+            <span class="conf-bar"><i style="width:${pct}%"></i></span> ${pct}%</span>
+        </div>
+        <dl style="margin:0">
+          <dt>Root cause</dt><dd>${esc(t.root_cause)}</dd>
+          <dt>Suggested action</dt><dd>${esc(t.suggested_action)}</dd>
+        </dl>
+        <div class="meta">
+          <code>${esc(t.model)}</code> ·
+          ${(t.input_tokens + t.output_tokens).toLocaleString()} tokens ·
+          $${t.cost_usd.toFixed(5)} ·
+          fingerprint <code>${esc(t.fingerprint)}</code>${reused}
+        </div>
+      </div>
+    </div>`;
+}
+
 function actionButtons(j) {
   if (j.state === 'queued' || j.state === 'pending')
     return `<button class="ghost sm" data-cancel="${j.id}">Cancel</button>`;
@@ -315,6 +347,7 @@ async function showJob(id) {
         <pre class="json">${esc(JSON.stringify(j.result, null, 2))}</pre></div>` : ''}
       ${j.error ? `<div class="field"><label>Last error</label>
         <pre class="json" style="color:var(--err)">${esc(j.error)}</pre></div>` : ''}
+      ${triagePanel(j.triage)}
       <div class="field"><label>Attempt timeline</label>${attempts || '<div class="muted">No attempts yet.</div>'}</div>
     </div>`;
   modal.onclick = (e) => { if (e.target === modal || e.target.dataset.close !== undefined) modal.remove(); };
@@ -357,8 +390,28 @@ async function killWorker(id) {
 $('chaos-random').onclick = () => killWorker(null);
 
 /* ---------------- dlq + webhooks ---------------- */
+const CATEGORY_LABEL = {
+  network: 'network', timeout: 'timeout', rate_limit: 'rate limit', auth: 'auth',
+  bad_input: 'bad input', dependency: 'dependency', resource: 'resource',
+  bug: 'bug', unknown: 'unknown',
+};
+
+function triageCell(t) {
+  if (!t) return '<span class="muted" style="font-size:12px">—</span>';
+  return `<span class="badge ai">${esc(CATEGORY_LABEL[t.category] || t.category)}</span> ` +
+    `<span class="badge ${t.is_transient ? 'transient' : 'permanent'}">` +
+    `${t.is_transient ? 'transient' : 'permanent'}</span>`;
+}
+
 async function loadDlq() {
-  const [dead, hooks] = await Promise.all([api('/jobs?state=dead&limit=50'), api('/webhook-deliveries?limit=25')]);
+  const [dead, hooks, triage, ai] = await Promise.all([
+    api('/jobs?state=dead&limit=50'),
+    api('/webhook-deliveries?limit=25'),
+    api('/triage?limit=200'),
+    api('/metrics/ai'),
+  ]);
+  const byJob = Object.fromEntries(triage.map((t) => [t.job_id, t]));
+  renderAiBanner(ai);
 
   $('dlq-body').innerHTML = dead.items.length
     ? dead.items.map((j) => `
@@ -366,14 +419,53 @@ async function loadDlq() {
           <td><code>${esc(j.type)}</code></td>
           <td>${esc(j.queue)}</td>
           <td>${j.attempts}/${j.max_attempts}</td>
-          <td class="muted mono" style="font-size:11.5px;max-width:340px;overflow:hidden;text-overflow:ellipsis">
+          <td class="nowrap">${triageCell(byJob[j.id])}</td>
+          <td class="muted mono" style="font-size:11.5px;max-width:280px;overflow:hidden;text-overflow:ellipsis">
             ${esc(j.error)}</td>
           <td class="nowrap muted">${ago(j.finished_at)}</td>
-          <td><button class="ghost sm" data-retry="${j.id}">Requeue</button></td>
+          <td class="nowrap">${byJob[j.id] || !ai.enabled ? '' :
+              `<button class="ghost sm" data-triage="${j.id}">Triage</button> `}` +
+            `<button class="ghost sm" data-retry="${j.id}">Requeue</button></td>
         </tr>`).join('')
-    : '<tr><td colspan="6" class="empty">Dead-letter queue is empty. Submit a <code>flaky</code> job with <code>fail_times</code> ≥ max attempts to populate it.</td></tr>';
+    : '<tr><td colspan="7" class="empty">Dead-letter queue is empty. Submit a <code>flaky</code> job with <code>fail_times</code> ≥ max attempts to populate it.</td></tr>';
   wireJobRows($('dlq-body'));
 
+  $('dlq-body').querySelectorAll('button[data-triage]').forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        await api(`/jobs/${b.dataset.triage}/triage`, { method: 'POST' });
+        toast('Triage queued — it runs as a job on the triage queue', 'ok');
+      } catch (err) { toast(err.message, 'err'); b.disabled = false; }
+    };
+  });
+
+  renderWebhooks(hooks);
+}
+
+function renderAiBanner(ai) {
+  const el = $('ai-banner');
+  if (!ai.enabled) {
+    // Say so plainly rather than showing an empty panel that looks broken.
+    el.className = 'ai-banner off';
+    el.innerHTML = '<strong>AI triage is off.</strong> Set <code>ANTHROPIC_API_KEY</code> ' +
+      'to have dead-lettered jobs automatically classified and explained. ' +
+      'Everything else on this platform works without it.';
+    return;
+  }
+  const t = ai.triage;
+  el.className = 'ai-banner';
+  el.innerHTML = `<strong>AI triage is on</strong> — when a job exhausts its retries, ` +
+    `<code>${esc(ai.model)}</code> classifies the failure, explains the root cause, and ` +
+    `recommends an action. Triage runs as a job on the <code>triage</code> queue, so it ` +
+    `inherits the same retries and dead-lettering as everything else.` +
+    `<div class="cost" style="margin-top:7px">` +
+    `${t.analyzed} analyzed · ${t.reused_from_fingerprint} reused from an identical error ` +
+    `signature (no API call) · ${t.tokens.toLocaleString()} tokens · $${t.cost_usd.toFixed(4)}` +
+    `</div>`;
+}
+
+function renderWebhooks(hooks) {
   $('webhooks-body').innerHTML = hooks.length
     ? hooks.map((d) => `
         <tr>
@@ -436,6 +528,19 @@ const DEFAULT_PAYLOADS = {
   http_fetch: { url: 'https://example.com' },
   thumbnail: { width: 128, height: 128 },
   email_sim: { to: 'someone@example.com', subject: 'Welcome!' },
+  llm_summarize: {
+    text: 'Paste the text to summarize here. LLM calls are slow and rate-limited, '
+      + 'which is exactly why they belong on a queue rather than in a request handler.',
+    max_words: 40,
+  },
+  llm_classify: {
+    text: 'The checkout page returns a 500 whenever I apply a discount code.',
+    labels: ['bug_report', 'feature_request', 'billing_question', 'other'],
+  },
+  llm_extract: {
+    text: 'Invoice INV-2043 dated 14 March 2026, total $1,299.00, billed to Acme Corp.',
+    fields: ['invoice_number', 'date', 'total', 'customer'],
+  },
 };
 
 function fillTypeSelects() {

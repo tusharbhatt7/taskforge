@@ -37,6 +37,17 @@ class Settings(BaseSettings):
     # Rate limiting (per user/IP, per minute)
     rate_limit_per_minute: int = 120
 
+    # ---- AI ----
+    # Unset key = AI job types and triage are disabled; everything else works unchanged.
+    anthropic_api_key: str | None = None
+    ai_model: str = "claude-opus-5"
+    ai_max_tokens: int = 8000
+    ai_effort: str | None = None          # low | medium | high | xhigh | max (None = API default)
+    ai_timeout_seconds: float = 120.0
+    ai_triage_enabled: bool = True        # auto-triage jobs that dead-letter
+    ai_server_side_fallbacks: bool = True  # recover safety-classifier refusals in-call
+    ai_max_input_chars: int = 40_000      # cap payload size before it reaches the API
+
     # Free-tier keep-alive: Render injects RENDER_EXTERNAL_URL automatically
     render_external_url: str | None = None
     keep_alive_minutes: int = 10

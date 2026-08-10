@@ -98,9 +98,29 @@ class AttemptOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class TriageOut(BaseModel):
+    id: uuid.UUID
+    job_id: uuid.UUID
+    fingerprint: str
+    category: str
+    is_transient: bool
+    root_cause: str
+    suggested_action: str
+    confidence: float
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+    reused_from_id: uuid.UUID | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class JobDetailOut(JobOut):
     depends_on: list[uuid.UUID] = []
     job_attempts: list[AttemptOut] = []
+    triage: TriageOut | None = None
 
 
 class JobListOut(BaseModel):
