@@ -270,7 +270,7 @@ async def resize_video(payload: dict, ctx: JobContext) -> dict:
 ## Tests
 
 ```bash
-uv run pytest -q     # 65 tests against real PostgreSQL
+uv run pytest -q     # 82 tests against real PostgreSQL
 ```
 
 They run against real Postgres rather than mocks, because the core guarantee *is* a
@@ -298,8 +298,10 @@ against a Postgres service container.
 
 Free tier: **Render** (web service) + **Neon** (Postgres).
 
-1. Create a Neon project and copy the connection string. Swap the scheme to
-   `postgresql+asyncpg://` and keep `?sslmode=require` off (asyncpg negotiates TLS itself).
+1. Create a Neon project and copy the connection string — paste it verbatim. The app
+   normalizes it (`postgres://` → `postgresql+asyncpg://`, and libpq-only parameters like
+   `sslmode=require` become an asyncpg TLS connect arg, since asyncpg rejects them as
+   unexpected kwargs). See `_normalize` in `app/core/config.py`.
 2. On Render: **New → Blueprint**, point it at this repo. `render.yaml` configures the
    Docker service; paste `DATABASE_URL` in the dashboard (`SECRET_KEY` is generated).
 3. `start.sh` runs migrations, the API, and `WORKER_COUNT` workers in the container.
@@ -323,7 +325,7 @@ app/
   engine/            claim.py · states.py · reaper.py · retry.py · cron.py · webhooks.py · events.py
   worker/            worker process, runner loop, handler registry
   static/            dashboard (vanilla JS + canvas charts, zero frontend dependencies)
-tests/               65 tests against real Postgres
+tests/               82 tests against real Postgres
 sdk/client.py        Python client
 scripts/             seed.py, demo.py
 ```
