@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Taskforge — Dashboard</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand"><span class="brand-mark">⚡</span> Taskforge</div>
+    <span class="panel-sub nowrap">distributed job execution</span>
+    <div class="spacer"></div>
+    <div class="live-dot" id="live"><i></i><span>connecting…</span></div>
+    <button class="ghost sm" id="logout">Log out</button>
+  </div>
+
+  <div class="tabs">
+    <button data-view="overview" class="active">Overview</button>
+    <button data-view="jobs">Jobs</button>
+    <button data-view="workers">Workers</button>
+    <button data-view="dlq">Dead letter</button>
+    <button data-view="schedules">Schedules</button>
+    <button data-view="submit">Submit job</button>
+    <button data-view="apikeys">API keys</button>
+  </div>
+
+  <main>
+    <!-- ============ OVERVIEW ============ -->
+    <section class="view active" id="view-overview">
+      <div class="grid cols-4" style="margin-bottom:18px">
+        <div class="stat"><div class="label">Queued</div><div class="value" id="s-queued">–</div>
+          <div class="sub" id="s-pending">waiting on deps: 0</div></div>
+        <div class="stat"><div class="label">Running</div><div class="value" id="s-running">–</div>
+          <div class="sub" id="s-workers">0 workers online</div></div>
+        <div class="stat"><div class="label">Success rate (1h)</div><div class="value" id="s-success">–</div>
+          <div class="sub" id="s-p95">p95 exec: –</div></div>
+        <div class="stat"><div class="label">Dead lettered</div><div class="value" id="s-dead">–</div>
+          <div class="sub">retries exhausted</div></div>
+      </div>
+
+      <div class="grid cols-2">
+        <div class="panel">
+          <header><h3>Throughput</h3><div class="spacer"></div>
+            <span class="panel-sub">completions / minute, last 30 min</span></header>
+          <canvas id="chart-throughput" height="150"></canvas>
+        </div>
+        <div class="panel">
+          <header><h3>Live event stream</h3><div class="spacer"></div>
+            <span class="panel-sub">Server-Sent Events over Postgres LISTEN/NOTIFY</span></header>
+          <div class="event-log" id="event-log">
+            <div class="muted" id="event-placeholder">Waiting for events…</div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <header><h3>Queues</h3></header>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Queue</th><th>Status</th><th>Queued</th><th>Running</th>
+            <th>Succeeded</th><th>Dead</th><th></th></tr></thead>
+          <tbody id="queues-body"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <!-- ============ JOBS ============ -->
+    <section class="view" id="view-jobs">
+      <div class="panel">
+        <header><h3>Jobs</h3><div class="spacer"></div>
+          <div class="row shrink" style="gap:8px;flex-wrap:nowrap">
+            <select id="filter-state" class="shrink" style="min-width:140px">
+              <option value="">All states</option>
+              <option value="pending">pending</option>
+              <option value="queued">queued</option>
+              <option value="running">running</option>
+              <option value="succeeded">succeeded</option>
+              <option value="dead">dead</option>
+              <option value="canceled">canceled</option>
+            </select>
+            <button class="ghost sm shrink" id="refresh-jobs">Refresh</button>
+          </div>
+        </header>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Type</th><th>Queue</th><th>State</th><th>Attempts</th>
+            <th>Created</th><th>Duration</th><th></th></tr></thead>
+          <tbody id="jobs-body"></tbody>
+        </table></div>
+        <div class="row" style="margin-top:12px">
+          <span class="panel-sub" id="jobs-count"></span>
+          <div class="spacer"></div>
+          <button class="ghost sm shrink" id="jobs-prev">← Prev</button>
+          <button class="ghost sm shrink" id="jobs-next">Next →</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ WORKERS ============ -->
+    <section class="view" id="view-workers">
+      <div class="chaos-banner">
+        <strong>Chaos engineering demo.</strong> “Kill” hard-crashes a worker process
+        (<code>os._exit</code>, no cleanup, no lease release) while it holds jobs. Its leases expire,
+        the reaper reclaims the orphaned jobs, and a surviving worker finishes them — no job is lost.
+        Watch it happen in the live event stream on Overview.
+      </div>
+      <div class="panel">
+        <header><h3>Workers</h3><div class="spacer"></div>
+          <button class="danger sm" id="chaos-random">💥 Kill a random worker</button></header>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Worker</th><th>Host / PID</th><th>State</th><th>Concurrency</th>
+            <th>Queues</th><th>Last heartbeat</th><th></th></tr></thead>
+          <tbody id="workers-body"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <!-- ============ DLQ ============ -->
+    <section class="view" id="view-dlq">
+      <div class="panel">
+        <header><h3>Dead-letter queue</h3><div class="spacer"></div>
+          <span class="panel-sub">jobs that exhausted every retry</span></header>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Type</th><th>Queue</th><th>Attempts</th><th>Last error</th>
+            <th>Failed at</th><th></th></tr></thead>
+          <tbody id="dlq-body"></tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <header><h3>Webhook deliveries</h3><div class="spacer"></div>
+          <span class="panel-sub">HMAC-signed callbacks with retry state</span></header>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Event</th><th>URL</th><th>State</th><th>Attempts</th>
+            <th>Response</th><th>Created</th></tr></thead>
+          <tbody id="webhooks-body"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <!-- ============ SCHEDULES ============ -->
+    <section class="view" id="view-schedules">
+      <div class="panel">
+        <header><h3>Create schedule</h3><div class="spacer"></div>
+          <span class="panel-sub">standard 5-field cron</span></header>
+        <div class="row">
+          <div><label>Name</label><input id="sc-name" placeholder="nightly-health-check"></div>
+          <div><label>Cron</label><input id="sc-cron" value="*/2 * * * *"></div>
+          <div><label>Job type</label><select id="sc-type"></select></div>
+          <div><label>Queue</label><input id="sc-queue" value="default"></div>
+          <div class="shrink"><button id="sc-create">Create</button></div>
+        </div>
+        <div class="field" style="margin-top:10px">
+          <label>Payload (JSON)</label>
+          <textarea id="sc-payload" rows="2">{"seconds": 1}</textarea>
+        </div>
+      </div>
+      <div class="panel">
+        <header><h3>Schedules</h3></header>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Name</th><th>Cron</th><th>Job type</th><th>Queue</th>
+            <th>Next run</th><th>Last run</th><th></th></tr></thead>
+          <tbody id="schedules-body"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <!-- ============ SUBMIT ============ -->
+    <section class="view" id="view-submit">
+      <div class="panel">
+        <header><h3>Submit a job</h3><div class="spacer"></div>
+          <span class="panel-sub">same endpoint the API/SDK uses</span></header>
+        <div class="row">
+          <div><label>Type</label><select id="sb-type"></select></div>
+          <div><label>Queue</label><input id="sb-queue" value="default"></div>
+          <div><label>Priority</label><input type="number" id="sb-priority" value="0"></div>
+          <div><label>Max attempts</label><input type="number" id="sb-max" value="3" min="1" max="10"></div>
+          <div><label>Delay (seconds)</label><input type="number" id="sb-delay" value="0" min="0"></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div><label>Idempotency key (optional)</label><input id="sb-idem" placeholder="order-1234-email"></div>
+          <div><label>Callback URL (optional)</label><input id="sb-callback" placeholder="https://webhook.site/..."></div>
+        </div>
+        <div class="field" style="margin-top:10px">
+          <label>Payload (JSON)</label>
+          <textarea id="sb-payload" rows="4">{"seconds": 3}</textarea>
+        </div>
+        <div class="row">
+          <div class="shrink"><button id="sb-submit">Submit job</button></div>
+          <div class="shrink"><button class="ghost" id="sb-burst">Submit demo burst (12 mixed jobs)</button></div>
+        </div>
+        <p class="panel-sub" style="margin-top:12px">
+          Handler cheat-sheet — <code>sleep</code>: <code>{"seconds": 3}</code> ·
+          <code>flaky</code>: <code>{"fail_times": 2}</code> (set <code>fail_times</code> ≥ max attempts to
+          force a dead-letter) · <code>http_fetch</code>: <code>{"url": "https://example.com"}</code> ·
+          <code>thumbnail</code>: <code>{"width": 128, "height": 128}</code> ·
+          <code>email_sim</code>: <code>{"to": "a@b.com", "subject": "hi"}</code>
+        </p>
+      </div>
+    </section>
+
+    <!-- ============ API KEYS ============ -->
+    <section class="view" id="view-apikeys">
+      <div class="panel">
+        <header><h3>API keys</h3><div class="spacer"></div>
+          <div class="row shrink" style="gap:8px;flex-wrap:nowrap">
+            <input id="ak-name" placeholder="my-laptop" class="shrink" style="min-width:170px">
+            <button class="sm shrink" id="ak-create">Create key</button>
+          </div>
+        </header>
+        <div id="ak-new"></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Name</th><th>Key</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+          <tbody id="apikeys-body"></tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <header><h3>Submit jobs programmatically</h3></header>
+        <pre class="json" id="curl-example"></pre>
+      </div>
+    </section>
+  </main>
+
+  <div id="modal-root"></div>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

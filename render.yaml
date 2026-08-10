@@ -1,0 +1,17 @@
+# Render Blueprint. Point Render at this repo (New → Blueprint) and it provisions
+# the service below. DATABASE_URL must be set manually to your Neon connection string.
+services:
+  - type: web
+    name: taskforge
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true          # Render generates a strong random value
+      - key: DATABASE_URL
+        sync: false                  # paste your Neon URL in the dashboard
+      - key: WORKER_COUNT
+        value: "2"
+      - key: ENV
+        value: production

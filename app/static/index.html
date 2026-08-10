@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Taskforge — Distributed Job Execution Platform</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <div style="text-align:center; margin-bottom:20px">
+        <div class="brand" style="justify-content:center; font-size:22px">
+          <span class="brand-mark">⚡</span> Taskforge
+        </div>
+        <p class="muted" style="margin:9px 0 0; font-size:13px">
+          Distributed job execution platform — Postgres-backed queues, worker leases,
+          retries with backoff, dead-letter queues, cron schedules.
+        </p>
+      </div>
+
+      <div class="panel">
+        <div class="auth-tabs">
+          <button id="tab-login" class="active">Log in</button>
+          <button id="tab-register">Sign up</button>
+        </div>
+        <form id="auth-form">
+          <div class="field">
+            <label for="email">Email</label>
+            <input type="email" id="email" required autocomplete="username" placeholder="you@example.com">
+          </div>
+          <div class="field">
+            <label for="password">Password <span id="pw-hint" style="display:none">(min 8 characters)</span></label>
+            <input type="password" id="password" required autocomplete="current-password" minlength="8">
+          </div>
+          <button type="submit" id="submit-btn" style="width:100%">Log in</button>
+          <div class="error-msg" id="error"></div>
+        </form>
+        <div class="hint">
+          Demo account: <code>demo@taskforge.dev</code> / <code>demo1234</code>
+        </div>
+      </div>
+      <p class="hint">
+        <a href="/docs">API docs (Swagger)</a> ·
+        <a href="https://github.com/tusharbhatt7/taskforge">Source on GitHub</a>
+      </p>
+    </div>
+  </div>
+
+  <script>
+    let mode = 'login';
+    const $ = (id) => document.getElementById(id);
+
+    $('tab-login').onclick = () => setMode('login');
+    $('tab-register').onclick = () => setMode('register');
+
+    function setMode(m) {
+      mode = m;
+      $('tab-login').classList.toggle('active', m === 'login');
+      $('tab-register').classList.toggle('active', m === 'register');
+      $('submit-btn').textContent = m === 'login' ? 'Log in' : 'Create account';
+      $('pw-hint').style.display = m === 'register' ? 'inline' : 'none';
+      $('password').autocomplete = m === 'login' ? 'current-password' : 'new-password';
+      $('error').textContent = '';
+    }
+
+    $('auth-form').onsubmit = async (e) => {
+      e.preventDefault();
+      $('error').textContent = '';
+      $('submit-btn').disabled = true;
+      try {
+        const res = await fetch(`/api/v1/auth/${mode}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: $('email').value, password: $('password').value }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Something went wrong');
+        localStorage.setItem('tf_token', data.access_token);
+        location.href = '/app';
+      } catch (err) {
+        $('error').textContent = err.message;
+      } finally {
+        $('submit-btn').disabled = false;
+      }
+    };
+
+    if (localStorage.getItem('tf_token')) location.href = '/app';
+  </script>
+</body>
+</html>
