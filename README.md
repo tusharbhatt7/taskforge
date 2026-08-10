@@ -296,7 +296,8 @@ against a Postgres service container.
 
 ## Deploying
 
-Free tier: **Render** (web service) + **Neon** (Postgres).
+Free tier: **Render** (web service) + **Neon** (Postgres). Step-by-step walkthrough in
+**[DEPLOY.md](DEPLOY.md)**; the short version:
 
 1. Create a Neon project and copy the connection string — paste it verbatim. The app
    normalizes it (`postgres://` → `postgresql+asyncpg://`, and libpq-only parameters like
