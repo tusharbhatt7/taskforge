@@ -56,9 +56,10 @@ starting api on port 10000...
 
 ## Step 3 — Seed the demo data
 
-In Render, open your service → **Shell** tab:
+Render's **Shell** tab is a paid-plan feature, so on the free plan seed from your own
+machine instead — the script only needs the database, not the running service:
 ```bash
-python -m scripts.seed
+DATABASE_URL='<your Neon connection string>' uv run python -m scripts.seed
 ```
 This creates the demo account (`demo@taskforge.dev` / `demo1234`), three queues, a cron
 schedule, and a starter workload including a deliberate dead-letter and a dependent

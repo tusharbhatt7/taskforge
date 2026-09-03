@@ -10,7 +10,7 @@ PostgreSQL.
 ![FastAPI](https://img.shields.io/badge/FastAPI-async-009688)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-queue%20backbone-336791)
 
-🔗 **Live demo:** _(add your Render URL here)_ · **API docs:** `/docs` · demo login `demo@taskforge.dev` / `demo1234`
+🔗 **Live demo:** https://taskforge-4k4h.onrender.com · **API docs:** [`/docs`](https://taskforge-4k4h.onrender.com/docs) · demo login `demo@taskforge.dev` / `demo1234`
 
 ---
 
